@@ -242,6 +242,9 @@ extern int builtin_unbind_variable (const char *);
 extern SHELL_VAR *builtin_find_indexed_array (char *, int);
 extern int builtin_arrayref_flags (WORD_DESC *, int);
 
+/* Functions from dh.def */
+extern void add_to_dir_history (char *);
+
 /* variables from evalfile.c */
 extern int sourcelevel;
 

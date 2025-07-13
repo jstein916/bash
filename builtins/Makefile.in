@@ -141,7 +141,7 @@ RL_LIBSRC = $(topdir)/lib/readline
 DEFSRC =  $(srcdir)/alias.def $(srcdir)/bind.def $(srcdir)/break.def \
 	  $(srcdir)/builtin.def $(srcdir)/caller.def \
 	  $(srcdir)/cd.def $(srcdir)/colon.def \
-	  $(srcdir)/command.def $(srcdir)/declare.def $(srcdir)/echo.def \
+	  $(srcdir)/command.def $(srcdir)/declare.def $(srcdir)/dh.def $(srcdir)/echo.def \
 	  $(srcdir)/enable.def $(srcdir)/eval.def $(srcdir)/getopts.def \
 	  $(srcdir)/exec.def $(srcdir)/exit.def $(srcdir)/fc.def \
 	  $(srcdir)/fg_bg.def $(srcdir)/hash.def $(srcdir)/help.def \
@@ -159,7 +159,7 @@ STATIC_SOURCE = common.c evalstring.c evalfile.c getopt.c bashgetopt.c \
 
 OFILES = builtins.o \
 	alias.o bind.o break.o builtin.o caller.o cd.o colon.o command.o \
-	common.o declare.o echo.o enable.o eval.o evalfile.o \
+	common.o declare.o dh.o echo.o enable.o eval.o evalfile.o \
 	evalstring.o exec.o exit.o fc.o fg_bg.o hash.o help.o history.o \
 	jobs.o kill.o let.o mapfile.o \
 	pushd.o read.o return.o set.o setattr.o shift.o source.o \
