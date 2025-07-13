@@ -1,0 +1,4 @@
+#!/bin/sh
+
+${THIS_SH} ./dh.tests > ${BASH_TSTOUT} 2>&1
+diff ${BASH_TSTOUT} dh.right && rm -f ${BASH_TSTOUT}

@@ -618,6 +618,9 @@ change_to_directory (char *newdir, int nolinks, int xattr)
       else
 	set_working_directory (tdir);
 
+      /* Add to directory history */
+      add_to_dir_history (tdir);
+
       free (tdir);
       return (1);
     }
@@ -651,6 +654,9 @@ change_to_directory (char *newdir, int nolinks, int xattr)
 	set_working_directory (tdir);
       else
 	free (t);
+
+      /* Add to directory history */
+      add_to_dir_history (tdir);
 
       r = 1;
     }

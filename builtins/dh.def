@@ -1,0 +1,807 @@
+This file is dh.def, from which is created dh.c.
+It implements the builtin "dh" in Bash.
+
+Copyright (C) 2025 Free Software Foundation, Inc.
+
+This file is part of GNU Bash, the Bourne Again SHell.
+
+Bash is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Bash is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Bash.  If not, see <http://www.gnu.org/licenses/>.
+
+$PRODUCES dh.c
+
+#include <config.h>
+
+#if defined (HAVE_UNISTD_H)
+#  include <unistd.h>
+#endif
+
+#include "../bashansi.h"
+#include "../bashintl.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+#include "../shell.h"
+#include "../general.h"
+#include "../builtins.h"
+#include "common.h"
+#include "bashgetopt.h"
+
+/* Directory history entry structure */
+struct dir_entry {
+  char *directory;
+  int count;
+  struct dir_entry *next;
+};
+
+/* Global directory history list */
+static struct dir_entry *dir_history = NULL;
+
+/* Function declarations */
+void add_to_dir_history (char *dir);
+static struct dir_entry *find_dir_entry (char *dir);
+static void free_dir_history (void);
+static void display_dir_history (int show_counts, int max_entries);
+static char *get_dirhistory_file (void);
+static void load_dir_history (void);
+static void save_dir_history (void);
+static int compare_dir_entries (const void *a, const void *b);
+int change_to_dir_by_number (int dir_number);
+static struct dir_entry **find_matching_dirs (char *partial_name, int *match_count);
+static void display_matching_dirs (struct dir_entry **matches, int match_count);
+
+$BUILTIN dh
+$FUNCTION dh_builtin
+$SHORT_DOC dh [-ciw] [-m N] [N|partial_name]
+Directory history navigation.
+
+Display the directories that have been visited using the cd command,
+ordered by frequency of access. Directories are numbered with the most
+frequently accessed directory having index 1 (displayed last in the list).
+
+Options:
+  -c            clear the directory history
+  -i            show visit counts in parentheses
+  -m N          limit display to N most recent directories
+  -w            write directory history to file
+
+Usage:
+  dh                            display directory list
+  dh -i                         display directory list with visit counts
+  dh -m 10                      display only the 10 most recent directories
+  dh -w                         save directory history to file
+  dh N                          change to directory number N from the list
+  dh N-M                        change to directory number N, then go up M levels
+  dh partial_name               change to directory matching partial_name, or show matches
+
+Examples:
+  dh 5                          change to the 5th directory in history
+  dh 5-2                        change to the 5th directory, then go up 2 parent directories
+  dh -m 5 -i                    show only 5 most recent directories with visit counts
+  dh proj                       change to directory containing 'proj' in its basename
+  dh bash                       change to directory containing 'bash', or show all matches
+
+Exit Status:
+Returns success unless an invalid option is given.
+$END
+
+/* Add a directory to the history or increment its count */
+void
+add_to_dir_history (char *dir)
+{
+  struct dir_entry *entry;
+  char *canonical_dir;
+
+  if (dir == NULL || *dir == '\0')
+    return;
+
+  /* Load history on first use */
+  static int history_loaded = 0;
+  if (!history_loaded)
+    {
+      load_dir_history ();
+      history_loaded = 1;
+    }
+
+  /* Canonicalize the directory path to avoid duplicates */
+  canonical_dir = sh_realpath (dir, NULL);
+  if (canonical_dir == NULL)
+    {
+      /* If realpath fails, try sh_canonpath with proper flags */
+      canonical_dir = sh_canonpath (dir, PATH_CHECKDOTDOT|PATH_CHECKEXISTS);
+      if (canonical_dir == NULL)
+        canonical_dir = savestring (dir);
+    }
+
+  /* Try to find existing entry */
+  entry = find_dir_entry (canonical_dir);
+  if (entry)
+    {
+      entry->count++;
+      free (canonical_dir);
+      save_dir_history (); /* Save after updating count */
+      return;
+    }
+
+  /* Create new entry */
+  entry = (struct dir_entry *)xmalloc (sizeof (struct dir_entry));
+  entry->directory = canonical_dir; /* Use canonical path */
+  entry->count = 1;
+  entry->next = dir_history;
+  dir_history = entry;
+  
+  save_dir_history (); /* Save after adding new directory */
+}
+
+/* Get the directory history file path */
+static char *
+get_dirhistory_file (void)
+{
+  char *env_file, *home, *file;
+
+  /* Check for DIRHISTFILE environment variable first */
+  env_file = get_string_value ("DIRHISTFILE");
+  if (env_file && *env_file)
+    return savestring (env_file);
+
+  /* Default to ~/.bash_dirhistory in home directory */
+  home = get_string_value ("HOME");
+  if (home && *home)
+    {
+      file = (char *)xmalloc (strlen (home) + 20);
+      sprintf (file, "%s/.bash_dirhistory", home);
+      return file;
+    }
+
+  /* Fallback to current directory */
+  return savestring (".bash_dirhistory");
+}
+
+/* Load directory history from file */
+static void
+load_dir_history (void)
+{
+  char *filename, *line;
+  FILE *file;
+  int count;
+  struct dir_entry *entry;
+
+  filename = get_dirhistory_file ();
+  if (!filename)
+    return;
+
+  file = fopen (filename, "r");
+  free (filename);
+  
+  if (!file)
+    return; /* File doesn't exist or can't be read */
+
+  /* Read entries in format: count:directory */
+  line = (char *)xmalloc (1024);
+  while (fgets (line, 1024, file))
+    {
+      char *colon, *dir;
+      
+      /* Remove trailing newline */
+      if (line[strlen(line) - 1] == '\n')
+        line[strlen(line) - 1] = '\0';
+
+      /* Parse count:directory format */
+      colon = strchr (line, ':');
+      if (!colon)
+        continue;
+
+      *colon = '\0';
+      count = atoi (line);
+      dir = colon + 1;
+
+      if (count > 0 && *dir != '\0')
+        {
+          char *canonical_dir;
+          struct dir_entry *existing_entry;
+          
+          /* Canonicalize the directory path to match what add_to_dir_history does */
+          canonical_dir = sh_realpath (dir, NULL);
+          if (canonical_dir == NULL)
+            {
+              /* If realpath fails, try sh_canonpath with proper flags */
+              canonical_dir = sh_canonpath (dir, PATH_CHECKDOTDOT|PATH_CHECKEXISTS);
+              if (canonical_dir == NULL)
+                canonical_dir = savestring (dir);
+            }
+          
+          /* Check if we already have this canonical path */
+          existing_entry = find_dir_entry (canonical_dir);
+          if (existing_entry)
+            {
+              /* Merge counts - use the higher count */
+              if (count > existing_entry->count)
+                existing_entry->count = count;
+              free (canonical_dir);
+            }
+          else
+            {
+              /* Create new entry with canonical path */
+              entry = (struct dir_entry *)xmalloc (sizeof (struct dir_entry));
+              entry->directory = canonical_dir;
+              entry->count = count;
+              entry->next = dir_history;
+              dir_history = entry;
+            }
+        }
+    }
+
+  free (line);
+  fclose (file);
+}
+
+/* Save directory history to file */
+static void
+save_dir_history (void)
+{
+  char *filename;
+  FILE *file;
+  struct dir_entry *entry;
+
+  filename = get_dirhistory_file ();
+  if (!filename)
+    return;
+
+  file = fopen (filename, "w");
+  if (!file)
+    {
+      builtin_error (_("cannot write to %s: %s"), filename, strerror (errno));
+      free (filename);
+      return;
+    }
+
+  /* Write entries in format: count:directory */
+  for (entry = dir_history; entry; entry = entry->next)
+    {
+      fprintf (file, "%d:%s\n", entry->count, entry->directory);
+    }
+
+  fclose (file);
+  free (filename);
+}
+
+/* Find a directory entry in the history */
+static struct dir_entry *
+find_dir_entry (char *dir)
+{
+  struct dir_entry *entry;
+
+  for (entry = dir_history; entry; entry = entry->next)
+    {
+      if (STREQ (entry->directory, dir))
+        return entry;
+    }
+  return NULL;
+}
+
+/* Free all directory history entries */
+static void
+free_dir_history (void)
+{
+  struct dir_entry *entry, *next;
+
+  for (entry = dir_history; entry; entry = next)
+    {
+      next = entry->next;
+      free (entry->directory);
+      free (entry);
+    }
+  dir_history = NULL;
+  
+  /* Also save to file when clearing */
+  save_dir_history ();
+}
+
+/* Comparison function for qsort - sort by count (ascending for display, but index numbers are reversed) */
+static int
+compare_dir_entries (const void *a, const void *b)
+{
+  struct dir_entry * const *entry_a = (struct dir_entry * const *)a;
+  struct dir_entry * const *entry_b = (struct dir_entry * const *)b;
+  
+  return (*entry_a)->count - (*entry_b)->count;
+}
+
+/* Display the directory history sorted by count */
+static void
+display_dir_history (int show_counts, int max_entries)
+{
+  struct dir_entry *entry;
+  struct dir_entry **entries;
+  int count, i, display_count, start_index;
+
+  /* Load history on first use */
+  static int history_loaded = 0;
+  if (!history_loaded)
+    {
+      load_dir_history ();
+      history_loaded = 1;
+    }
+
+  /* Count entries */
+  count = 0;
+  for (entry = dir_history; entry; entry = entry->next)
+    count++;
+
+  if (count == 0)
+    {
+      printf (_("No directories in history.\n"));
+      return;
+    }
+
+  /* Create array for sorting */
+  entries = (struct dir_entry **)xmalloc (count * sizeof (struct dir_entry *));
+  
+  i = 0;
+  for (entry = dir_history; entry; entry = entry->next)
+    entries[i++] = entry;
+
+  /* Sort by count (ascending - least frequent first, but index numbers will be reversed) */
+  qsort (entries, count, sizeof (struct dir_entry *), compare_dir_entries);
+
+  /* Determine how many entries to display and starting index */
+  if (max_entries > 0 && max_entries < count)
+    {
+      display_count = max_entries;
+      start_index = count - max_entries;  /* Show the most recent (highest count) entries */
+    }
+  else
+    {
+      display_count = count;
+      start_index = 0;
+    }
+
+  /* Display sorted entries with reversed index numbers (most frequent = index 1, displayed last) */
+  for (i = start_index; i < start_index + display_count; i++)
+    {
+      if (show_counts)
+        printf ("%5d  %s (%d)\n", count - i, entries[i]->directory, entries[i]->count);
+      else
+        printf ("%5d  %s\n", count - i, entries[i]->directory);
+    }
+
+  free (entries);
+}
+
+/* Change to a directory by its number in the history list, optionally going up levels */
+int
+change_to_dir_by_number_with_levels (int dir_number, int levels_up)
+{
+  struct dir_entry *entry;
+  struct dir_entry **entries;
+  int count, i;
+  char *target_dir, *modified_dir;
+  char *path_copy, *current_pos;
+
+  /* Load history on first use */
+  static int history_loaded = 0;
+  if (!history_loaded)
+    {
+      load_dir_history ();
+      history_loaded = 1;
+    }
+
+  /* Count entries */
+  count = 0;
+  for (entry = dir_history; entry; entry = entry->next)
+    count++;
+
+  if (count == 0)
+    {
+      builtin_error (_("no directories in history"));
+      return (EXECUTION_FAILURE);
+    }
+
+  if (dir_number < 1 || dir_number > count)
+    {
+      builtin_error (_("directory number %d out of range (1-%d)"), dir_number, count);
+      return (EXECUTION_FAILURE);
+    }
+
+  /* Create array for sorting (same order as display) */
+  entries = (struct dir_entry **)xmalloc (count * sizeof (struct dir_entry *));
+  
+  i = 0;
+  for (entry = dir_history; entry; entry = entry->next)
+    entries[i++] = entry;
+
+  /* Sort by count (ascending - least frequent first, but index numbers will be reversed) */
+  qsort (entries, count, sizeof (struct dir_entry *), compare_dir_entries);
+
+  /* Get the target directory using reversed indexing (1 = most frequent, at end of sorted array) */
+  target_dir = entries[count - dir_number]->directory;
+  
+  /* If levels_up is 0, use the directory as-is */
+  if (levels_up == 0)
+    {
+      modified_dir = target_dir;
+    }
+  else
+    {
+      /* Create a copy of the path to modify */
+      path_copy = savestring (target_dir);
+      modified_dir = path_copy;
+      
+      /* Remove trailing slashes except for root */
+      int len = strlen (path_copy);
+      while (len > 1 && path_copy[len - 1] == '/')
+        {
+          path_copy[len - 1] = '\0';
+          len--;
+        }
+      
+      /* Go up the specified number of levels */
+      for (i = 0; i < levels_up && strlen (path_copy) > 1; i++)
+        {
+          current_pos = strrchr (path_copy, '/');
+          if (current_pos && current_pos != path_copy)
+            *current_pos = '\0';
+          else if (current_pos == path_copy)
+            {
+              /* We're at root level, can't go higher */
+              path_copy[1] = '\0';  /* Keep just "/" */
+              break;
+            }
+        }
+      
+      modified_dir = path_copy;
+    }
+  
+  /* Print the directory we're changing to */
+  printf ("%s\n", modified_dir);
+  
+  /* Change to the directory and update bash's internal state */
+  if (chdir (modified_dir) == 0)
+    {
+      char *old_pwd;
+      
+      /* Get current PWD for OLDPWD */
+      old_pwd = get_string_value ("PWD");
+      if (old_pwd)
+        bind_variable ("OLDPWD", old_pwd, 0);
+      
+      /* Update shell's working directory and environment variables */
+      set_working_directory (modified_dir);
+      
+      /* Update PWD environment variable */
+      bind_variable ("PWD", modified_dir, 0);
+      
+      free (entries);
+      if (levels_up > 0)
+        free (path_copy);
+      return (EXECUTION_SUCCESS);
+    }
+  else
+    {
+      builtin_error (_("cannot change to directory '%s': %s"), modified_dir, strerror (errno));
+      free (entries);
+      if (levels_up > 0)
+        free (path_copy);
+      return (EXECUTION_FAILURE);
+    }
+}
+
+/* Parse directory number with optional levels up (N-M format) 
+   Returns 1 if valid format, 0 if invalid
+   Sets dir_number and levels_up accordingly */
+static int
+parse_dir_with_levels (char *word, int *dir_number, int *levels_up)
+{
+  char *dash_pos, *endptr;
+  long num1, num2;
+
+  *levels_up = 0;  /* Default to no levels up */
+  
+  /* Look for dash */
+  dash_pos = strchr (word, '-');
+  if (dash_pos == NULL)
+    {
+      /* No dash, just a simple number */
+      if (!all_digits (word))
+        return 0;
+      
+      *dir_number = atoi (word);
+      return (*dir_number > 0) ? 1 : 0;
+    }
+  
+  /* Found dash, parse both numbers */
+  *dash_pos = '\0';  /* Temporarily split the string */
+  
+  /* Check first part (directory number) */
+  if (!all_digits (word))
+    {
+      *dash_pos = '-';  /* Restore the string */
+      return 0;
+    }
+  
+  num1 = strtol (word, &endptr, 10);
+  if (*endptr != '\0' || num1 <= 0)
+    {
+      *dash_pos = '-';  /* Restore the string */
+      return 0;
+    }
+  
+  /* Check second part (levels up) */
+  if (!all_digits (dash_pos + 1))
+    {
+      *dash_pos = '-';  /* Restore the string */
+      return 0;
+    }
+  
+  num2 = strtol (dash_pos + 1, &endptr, 10);
+  if (*endptr != '\0' || num2 < 0)
+    {
+      *dash_pos = '-';  /* Restore the string */
+      return 0;
+    }
+  
+  *dash_pos = '-';  /* Restore the string */
+  
+  *dir_number = (int)num1;
+  *levels_up = (int)num2;
+  
+  return 1;
+}
+
+/* Change to a directory by its number in the history list */
+int
+change_to_dir_by_number (int dir_number)
+{
+  return change_to_dir_by_number_with_levels (dir_number, 0);
+}
+
+/* The dh builtin */
+int
+dh_builtin (WORD_LIST *list)
+{
+  int opt, clear_history, show_counts, write_history, max_entries;
+  char *word;
+  int dir_number, levels_up;
+
+  clear_history = 0;
+  show_counts = 0;
+  write_history = 0;
+  max_entries = 0;  /* 0 means show all entries */
+  
+  /* Check for numeric argument first (before parsing options) */
+  if (list && list->word && list->word->word)
+    {
+      word = list->word->word;
+      /* Check if it's a directory number with optional levels (N or N-M format) */
+      if (parse_dir_with_levels (word, &dir_number, &levels_up))
+        {
+          return (change_to_dir_by_number_with_levels (dir_number, levels_up));
+        }
+    }
+
+  reset_internal_getopt ();
+  while ((opt = internal_getopt (list, "cim:w")) != -1)
+    {
+      switch (opt)
+        {
+        case 'c':
+          clear_history = 1;
+          break;
+        case 'i':
+          show_counts = 1;
+          break;
+        case 'm':
+          max_entries = atoi (list_optarg);
+          if (max_entries <= 0)
+            {
+              builtin_error (_("invalid max entries: %s"), list_optarg);
+              return (EX_USAGE);
+            }
+          break;
+        case 'w':
+          write_history = 1;
+          break;
+        CASE_HELPOPT;
+        default:
+          builtin_usage ();
+          return (EX_USAGE);
+        }
+    }
+  list = loptend;
+
+  /* Check for numeric argument or partial directory name after options */
+  if (list && list->word && list->word->word)
+    {
+      word = list->word->word;
+      if (parse_dir_with_levels (word, &dir_number, &levels_up))
+        {
+          return (change_to_dir_by_number_with_levels (dir_number, levels_up));
+        }
+      else
+        {
+          /* Try partial directory matching */
+          struct dir_entry **matches;
+          int match_count;
+          
+          matches = find_matching_dirs (word, &match_count);
+          
+          if (match_count == 0)
+            {
+              builtin_error (_("no directories match '%s'"), word);
+              return (EXECUTION_FAILURE);
+            }
+          else if (match_count == 1)
+            {
+              /* Single match - change to that directory */
+              printf ("%s\n", matches[0]->directory);
+              if (chdir (matches[0]->directory) == 0)
+                {
+                  char *old_pwd;
+                  
+                  /* Get current PWD for OLDPWD */
+                  old_pwd = get_string_value ("PWD");
+                  if (old_pwd)
+                    bind_variable ("OLDPWD", old_pwd, 0);
+                  
+                  /* Update shell's working directory and environment variables */
+                  set_working_directory (matches[0]->directory);
+                  
+                  /* Update PWD environment variable */
+                  bind_variable ("PWD", matches[0]->directory, 0);
+                  
+                  free (matches);
+                  return (EXECUTION_SUCCESS);
+                }
+              else
+                {
+                  builtin_error (_("cannot change to directory '%s': %s"), 
+                                matches[0]->directory, strerror (errno));
+                  free (matches);
+                  return (EXECUTION_FAILURE);
+                }
+            }
+          else
+            {
+              /* Multiple matches - display them */
+              display_matching_dirs (matches, match_count);
+              free (matches);
+              return (EXECUTION_SUCCESS);
+            }
+        }
+    }
+
+  if (clear_history)
+    {
+      free_dir_history ();
+      return (EXECUTION_SUCCESS);
+    }
+
+  if (write_history)
+    {
+      save_dir_history ();
+      return (EXECUTION_SUCCESS);
+    }
+
+  display_dir_history (show_counts, max_entries);
+  return (EXECUTION_SUCCESS);
+}
+
+/* Search for directories matching a partial name */
+static struct dir_entry **
+find_matching_dirs (char *partial_name, int *match_count)
+{
+  struct dir_entry *entry;
+  struct dir_entry **matches;
+  char *basename_dir, *basename_partial;
+  int allocated_matches = 10;
+  int count = 0;
+
+  if (!partial_name || !*partial_name)
+    {
+      *match_count = 0;
+      return NULL;
+    }
+
+  /* Load history if not already loaded */
+  static int history_loaded = 0;
+  if (!history_loaded)
+    {
+      load_dir_history ();
+      history_loaded = 1;
+    }
+
+  matches = (struct dir_entry **)xmalloc (allocated_matches * sizeof (struct dir_entry *));
+  basename_partial = strrchr (partial_name, '/');
+  if (basename_partial)
+    basename_partial++;
+  else
+    basename_partial = partial_name;
+
+  /* Search through directory history */
+  for (entry = dir_history; entry; entry = entry->next)
+    {
+      /* Get the basename of the directory */
+      basename_dir = strrchr (entry->directory, '/');
+      if (basename_dir)
+        basename_dir++;
+      else
+        basename_dir = entry->directory;
+
+      /* Check if the basename contains the partial name OR if the full path contains it */
+      if (strstr (basename_dir, basename_partial) != NULL || 
+          strstr (entry->directory, basename_partial) != NULL)
+        {
+          /* Expand array if needed */
+          if (count >= allocated_matches)
+            {
+              allocated_matches *= 2;
+              matches = (struct dir_entry **)xrealloc (matches, 
+                          allocated_matches * sizeof (struct dir_entry *));
+            }
+          matches[count++] = entry;
+        }
+    }
+
+  *match_count = count;
+  if (count == 0)
+    {
+      free (matches);
+      return NULL;
+    }
+
+  return matches;
+}
+
+/* Display matching directories with their numbers */
+static void
+display_matching_dirs (struct dir_entry **matches, int match_count)
+{
+  struct dir_entry *entry;
+  struct dir_entry **sorted_entries;
+  int i, count, index;
+
+  if (match_count == 0)
+    return;
+
+  /* Sort all directories to assign consistent numbers */
+  count = 0;
+  for (entry = dir_history; entry; entry = entry->next)
+    count++;
+
+  sorted_entries = (struct dir_entry **)xmalloc (count * sizeof (struct dir_entry *));
+  i = 0;
+  for (entry = dir_history; entry; entry = entry->next)
+    sorted_entries[i++] = entry;
+
+  qsort (sorted_entries, count, sizeof (struct dir_entry *), compare_dir_entries);
+
+  printf ("Multiple matches found:\n");
+  
+  /* Display matches with their numbers */
+  for (i = 0; i < match_count; i++)
+    {
+      /* Find the index of this match in the sorted list */
+      for (index = 0; index < count; index++)
+        {
+          if (sorted_entries[index] == matches[i])
+            {
+              printf ("%5d  %s\n", count - index, matches[i]->directory);
+              break;
+            }
+        }
+    }
+
+  free (sorted_entries);
+}

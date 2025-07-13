@@ -1,0 +1,20 @@
+Testing dh builtin basic functionality
+Empty history test:
+PASS: Empty history message
+History display test:
+PASS: History contains dir1
+PASS: History contains dir2
+Visit counts test:
+PASS: Visit counts shown
+Limited display test:
+PASS: Limited display works
+Clear history test:
+PASS: History cleared
+Error handling test:
+PASS: Invalid max entries error
+PASS: Out of range error
+Help output test:
+PASS: Help text available
+Partial matching test:
+PASS: Multiple matches detected
+dh builtin tests completed

@@ -1,0 +1,57 @@
+# tests for the dh builtin (directory history)
+
+# Test basic functionality
+echo "Testing dh builtin basic functionality"
+
+# Start with clean history
+dh -c
+
+# Test 1: Empty history
+echo "Empty history test:"
+dh | grep -q "No directories in history" && echo "PASS: Empty history message" || echo "FAIL: Empty history message"
+
+# Test 2: Build and display history
+mkdir -p /tmp/dhtest$$/dir1 /tmp/dhtest$$/dir2 2>/dev/null
+cd /tmp/dhtest$$/dir1
+cd /tmp/dhtest$$/dir2
+cd /tmp/dhtest$$/dir1  # increase frequency
+
+echo "History display test:"
+dh | grep -q "dir1" && echo "PASS: History contains dir1" || echo "FAIL: History missing dir1"
+dh | grep -q "dir2" && echo "PASS: History contains dir2" || echo "FAIL: History missing dir2"
+
+# Test 3: Visit counts
+echo "Visit counts test:"
+dh -i | grep -q "(2)" && echo "PASS: Visit counts shown" || echo "FAIL: Visit counts not shown"
+
+# Test 4: Limited display  
+echo "Limited display test:"
+count=$(dh -m 1 | grep -v "directories in history" | wc -l)
+test "$count" -eq 1 && echo "PASS: Limited display works" || echo "FAIL: Limited display failed"
+
+# Test 5: Clear history
+echo "Clear history test:"
+dh -c
+dh | grep -q "No directories in history" && echo "PASS: History cleared" || echo "FAIL: History not cleared"
+
+# Test 6: Error handling
+echo "Error handling test:"
+dh -m 0 2>&1 | grep -q "invalid max entries" && echo "PASS: Invalid max entries error" || echo "FAIL: Missing error for invalid max"
+# Build some history for the out of range test
+cd /tmp/dhtest$$/dir1
+cd /tmp/dhtest$$/dir2
+dh 999 2>&1 | grep -q "out of range" && echo "PASS: Out of range error" || echo "FAIL: Missing out of range error"
+
+# Test 7: Help output
+echo "Help output test:"
+dh --help 2>&1 | grep -q "Directory history navigation" && echo "PASS: Help text available" || echo "FAIL: Help text missing"
+
+# Test 8: Partial matching
+cd /tmp/dhtest$$/dir1
+cd /tmp/dhtest$$/dir2/subdir 2>/dev/null || mkdir -p /tmp/dhtest$$/dir2/subdir && cd /tmp/dhtest$$/dir2/subdir
+echo "Partial matching test:"
+dh dir 2>&1 | grep -q "Multiple matches" && echo "PASS: Multiple matches detected" || echo "FAIL: Multiple matches not detected"
+
+# Cleanup
+rm -rf /tmp/dhtest$$ 2>/dev/null
+echo "dh builtin tests completed"
